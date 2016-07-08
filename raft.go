@@ -68,7 +68,7 @@ type leaderState struct {
 	commitCh   chan struct{}
 	commitment *commitment
 	inflight   *list.List // list of logFuture in log index order
-	replState  map[ServerID]*followerReplication
+	replState  map[ServerID]*replication
 	notify     map[*verifyFuture]struct{}
 	stepDown   chan struct{}
 }
@@ -896,7 +896,7 @@ func (r *Raft) runLeader() {
 		r.configurations.latest,
 		r.getLastIndex()+1 /* first index that may be committed in this term */)
 	r.leaderState.inflight = list.New()
-	r.leaderState.replState = make(map[ServerID]*followerReplication)
+	r.leaderState.replState = make(map[ServerID]*replication)
 	r.leaderState.notify = make(map[*verifyFuture]struct{})
 	r.leaderState.stepDown = make(chan struct{}, 1)
 
@@ -911,7 +911,11 @@ func (r *Raft) runLeader() {
 
 		// Stop replication
 		for _, p := range r.leaderState.replState {
-			close(p.stopCh)
+			p.controlLock.Lock()
+			p.control.shutdown = true
+			p.control.shutdownIndex = 0
+			asyncNotifyCh(p.controlCh)
+			p.controlLock.Unlock()
 		}
 
 		// Respond to all inflight operations
@@ -994,20 +998,7 @@ func (r *Raft) startStopReplication() {
 		inConfig[server.ID] = true
 		if _, ok := r.leaderState.replState[server.ID]; !ok {
 			r.logger.Printf("[INFO] raft: Added peer %v, starting replication", server.ID)
-			s := &followerReplication{
-				peer:        server,
-				commitment:  r.leaderState.commitment,
-				stopCh:      make(chan uint64, 1),
-				triggerCh:   make(chan struct{}, 1),
-				currentTerm: r.getCurrentTerm(),
-				nextIndex:   lastIdx + 1,
-				lastContact: time.Now(),
-				notifyCh:    make(chan struct{}, 1),
-				stepDown:    r.leaderState.stepDown,
-			}
-			r.leaderState.replState[server.ID] = s
-			r.goFunc(func() { r.replicate(s) })
-			asyncNotifyCh(s.triggerCh)
+			r.leaderState.replState[server.ID] = newReplication(r, server, r.currentTerm)
 		}
 	}
 
@@ -1018,8 +1009,11 @@ func (r *Raft) startStopReplication() {
 		}
 		// Replicate up to lastIdx and stop
 		r.logger.Printf("[INFO] raft: Removed peer %v, stopping replication after %v", serverID, lastIdx)
-		repl.stopCh <- lastIdx
-		close(repl.stopCh)
+		repl.controlLock.Lock()
+		repl.control.shutdown = true
+		repl.control.shutdownIndex = lastIdx
+		asyncNotifyCh(repl.controlCh)
+		repl.controlLock.Unlock()
 		delete(r.leaderState.replState, serverID)
 	}
 }
@@ -1183,10 +1177,11 @@ func (r *Raft) verifyLeader(v *verifyFuture) {
 
 	// Trigger immediate heartbeats
 	for _, repl := range r.leaderState.replState {
-		repl.notifyLock.Lock()
-		repl.notify = append(repl.notify, v)
-		repl.notifyLock.Unlock()
-		asyncNotifyCh(repl.notifyCh)
+		repl.controlLock.Lock()
+		repl.control.verifyTerm++
+		asyncNotifyCh(repl.controlCh)
+		repl.controlLock.Unlock()
+		// TODO: get back to v?
 	}
 }
 
@@ -1195,38 +1190,43 @@ func (r *Raft) verifyLeader(v *verifyFuture) {
 // as we may have lost connectivity. Returns the maximum duration without
 // contact.
 func (r *Raft) checkLeaderLease() time.Duration {
-	// Track contacted nodes, we can always contact ourself
-	contacted := 1
+	/*
+		// Track contacted nodes, we can always contact ourself
+		contacted := 1
 
-	// Check each follower
-	var maxDiff time.Duration
-	now := time.Now()
-	for peer, f := range r.leaderState.replState {
-		diff := now.Sub(f.LastContact())
-		if diff <= r.conf.LeaderLeaseTimeout {
-			contacted++
-			if diff > maxDiff {
-				maxDiff = diff
-			}
-		} else {
-			// Log at least once at high value, then debug. Otherwise it gets very verbose.
-			if diff <= 3*r.conf.LeaderLeaseTimeout {
-				r.logger.Printf("[WARN] raft: Failed to contact %v in %v", peer, diff)
-			} else {
-				r.logger.Printf("[DEBUG] raft: Failed to contact %v in %v", peer, diff)
-			}
+		// Check each follower
+		var maxDiff time.Duration
+		now := time.Now()
+		for peer, f := range r.leaderState.replState {
+					diff := now.Sub(f.LastContact())
+					if diff <= r.conf.LeaderLeaseTimeout {
+						contacted++
+						if diff > maxDiff {
+							maxDiff = diff
+						}
+					} else {
+						// Log at least once at high value, then debug. Otherwise it gets very verbose.
+						if diff <= 3*r.conf.LeaderLeaseTimeout {
+							r.logger.Printf("[WARN] raft: Failed to contact %v in %v", peer, diff)
+						} else {
+							r.logger.Printf("[DEBUG] raft: Failed to contact %v in %v", peer, diff)
+						}
+					}
+				metrics.AddSample([]string{"raft", "leader", "lastContact"}, float32(diff/time.Millisecond))
 		}
-		metrics.AddSample([]string{"raft", "leader", "lastContact"}, float32(diff/time.Millisecond))
-	}
+	*/
 
-	// Verify we can contact a quorum
-	quorum := r.quorumSize()
-	if contacted < quorum {
-		r.logger.Printf("[WARN] raft: Failed to contact quorum of nodes, stepping down")
-		r.setState(Follower)
-		metrics.IncrCounter([]string{"raft", "transition", "leader_lease_timeout"}, 1)
-	}
-	return maxDiff
+	/*
+		// Verify we can contact a quorum
+		quorum := r.quorumSize()
+		if contacted < quorum {
+			r.logger.Printf("[WARN] raft: Failed to contact quorum of nodes, stepping down")
+			r.setState(Follower)
+			metrics.IncrCounter([]string{"raft", "transition", "leader_lease_timeout"}, 1)
+		}
+		return maxDiff
+	*/
+	return time.Duration(0) // TODO: remove
 }
 
 // quorumSize is used to return the quorum size
@@ -1388,7 +1388,7 @@ func (r *Raft) dispatchLogs(applyLogs []*logFuture) {
 
 	// Notify the replicators of the new log
 	for _, f := range r.leaderState.replState {
-		asyncNotifyCh(f.triggerCh)
+		asyncNotifyCh(f.controlCh)
 	}
 }
 
@@ -2136,4 +2136,22 @@ func (r *Raft) restoreSnapshot() error {
 		return fmt.Errorf("failed to load any existing snapshots")
 	}
 	return nil
+}
+
+func (r *Raft) getTerm(index uint64) (uint64, error) {
+	if index == 0 {
+		return 0, nil
+	}
+	lastSnapIdx, lastSnapTerm := r.getLastSnapshot()
+	if index == lastSnapIdx {
+		return lastSnapTerm, nil
+	}
+
+	var l Log
+	if err := r.logs.GetLog(index, &l); err != nil {
+		r.logger.Printf("[ERR] raft: Failed to get log entry at index %d: %v",
+			index, err)
+		return 0, err
+	}
+	return l.Term, nil
 }
