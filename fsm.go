@@ -11,10 +11,11 @@ import (
 // FSM provides an interface that can be implemented by
 // clients to make use of the replicated log.
 type FSM interface {
-	// Apply log is invoked once a log entry is committed.
-	// It returns a value which will be made available in the
-	// ApplyFuture returned by Raft.Apply method if that
-	// method was called on the same Raft node as the FSM.
+	// Apply is invoked once a log entry is committed. Apply is only called for
+	// log entries that FSM commands (it's not called for secial entries such as
+	// those used internally for membership changes). Apply returns a value which
+	// will be made available in the ApplyFuture returned by Raft.Apply method if
+	// that method was called on the same Raft node as the FSM.
 	Apply(*Log) interface{}
 
 	// Snapshot is used to support log compaction. This call should

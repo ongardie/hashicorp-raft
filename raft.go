@@ -893,38 +893,12 @@ func (r *Raft) processLogs(index Index, future *logFuture) {
 
 // processLog is invoked to process the application of a single committed log entry.
 func (r *Raft) processLog(l *Log, future *logFuture) {
-	switch l.Type {
-	case LogBarrier:
-		// Barrier is handled by the FSM
-		fallthrough
-
-	case LogCommand:
-		// Forward to the fsm handler
-		select {
-		case r.fsmCommitCh <- commitTuple{l, future}:
-		case <-r.shutdownCh:
-			if future != nil {
-				future.respond(ErrRaftShutdown)
-			}
+	select {
+	case r.fsmCommitCh <- commitTuple{l, future}:
+	case <-r.shutdownCh:
+		if future != nil {
+			future.respond(ErrRaftShutdown)
 		}
-
-		// Return so that the future is only responded to
-		// by the FSM handler when the application is done
-		return
-
-	case LogConfiguration:
-	case LogAddPeerDeprecated:
-	case LogRemovePeerDeprecated:
-	case LogNoop:
-		// Ignore the no-op
-
-	default:
-		panic(fmt.Errorf("unrecognized log type: %#v", l))
-	}
-
-	// Invoke the future if given
-	if future != nil {
-		future.respond(nil)
 	}
 }
 

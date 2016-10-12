@@ -167,13 +167,7 @@ func (r *Raft) takeSnapshot() error {
 	committedIndex := configReq.configurations.committedIndex
 
 	// We don't support snapshots while there's a config change outstanding
-	// since the snapshot doesn't have a means to represent this state. This
-	// is a little weird because we need the FSM to apply an index that's
-	// past the configuration change, even though the FSM itself doesn't see
-	// the configuration changes. It should be ok in practice with normal
-	// application traffic flowing through the FSM. If there's none of that
-	// then it's not crucial that we snapshot, since there's not much going
-	// on Raft-wise.
+	// since the snapshot doesn't have a means to represent this state.
 	if snapReq.index < committedIndex {
 		return fmt.Errorf("cannot take snapshot now, wait until the configuration entry at %v has been applied (have applied %v)",
 			committedIndex, snapReq.index)
